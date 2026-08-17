@@ -95,8 +95,9 @@ func TestCreateMacosPodDispatchesRunAndRegisters(t *testing.T) {
 		"--storage 107374182400",
 		"--exit-on-reboot",
 		"--vnc 0",
+		"--vnc-password testpass",
 		"--random-smbios",
-		"--net tap --bridge cni0",
+		"--net cni",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("run argv missing %q\n got: %s", want, joined)
@@ -166,6 +167,29 @@ func TestMacosProbeUsesDeclaredProbePort(t *testing.T) {
 	}
 	if ready, msg := probe(t.Context()); ready || !strings.Contains(msg, "tcp probe "+port) {
 		t.Fatalf("closed declared probe port should make macOS unready, got ready=%v msg=%q", ready, msg)
+	}
+}
+
+func TestFormatMacosArgsForLogRedactsPassword(t *testing.T) {
+	got := formatMacosArgsForLog([]string{"vm", "start", "--vnc", "1", "--vnc-password", "secret", "demo"})
+	if strings.Contains(got, "secret") || !strings.Contains(got, "--vnc-password <redacted>") {
+		t.Fatalf("redacted args = %q", got)
+	}
+}
+
+func TestAppendMacosVNCArgsRequiresPassword(t *testing.T) {
+	p := newTestProvider(t)
+	p.MacosVNCPassword = ""
+	if _, err := p.appendMacosVNCArgs([]string{"vm", "start"}, 5900); err == nil {
+		t.Fatal("expected missing VNC password to be rejected")
+	}
+}
+
+func TestAppendMacosVNCArgsRejectsLongPassword(t *testing.T) {
+	p := newTestProvider(t)
+	p.MacosVNCPassword = "123456789"
+	if _, err := p.appendMacosVNCArgs([]string{"vm", "start"}, 5900); err == nil {
+		t.Fatal("expected VNC password longer than 8 bytes to be rejected")
 	}
 }
 
@@ -244,8 +268,8 @@ func TestCreateMacosPodStartsDeadRecord(t *testing.T) {
 	}
 	// VNC is launch-scoped in cocoon-macos: a bare `vm start` disables it while
 	// the vnc-port annotation still advertises the display.
-	if joined := strings.Join(starts[0], " "); !strings.Contains(joined, "--vnc 0") || !strings.Contains(joined, "--exit-on-reboot") {
-		t.Errorf("`vm start` must re-assert VNC and managed reboot policy, got: %s", joined)
+	if joined := strings.Join(starts[0], " "); !strings.Contains(joined, "--exit-on-reboot --vnc 0 --vnc-password testpass") {
+		t.Errorf("`vm start` must re-assert protected VNC and managed reboot policy, got: %s", joined)
 	}
 	if len(macosCallsWithPrefix(all, "vm", "run")) != 0 {
 		t.Fatalf("dead record must not relaunch via `vm run` (disk corruption), got %v", all)
