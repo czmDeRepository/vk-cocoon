@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -64,6 +66,16 @@ func TestClaimMacosVNCPort(t *testing.T) {
 func TestCreateMacosPodDispatchesRunAndRegisters(t *testing.T) {
 	p := newTestProvider(t)
 	pod := newPodWithSpec(macosSpec())
+	pod.Spec.Containers = []corev1.Container{{Resources: corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("4"),
+			corev1.ResourceMemory: resource.MustParse("8Gi"),
+		},
+	}}}
 	p.Clientset = fake.NewSimpleClientset(pod)
 	calls := stubMacosExec(p, freshCreateHandler)
 
