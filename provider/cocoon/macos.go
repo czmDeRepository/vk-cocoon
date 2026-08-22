@@ -154,7 +154,10 @@ func (p *Provider) createMacosPod(ctx context.Context, pod *corev1.Pod, spec met
 			"--cpus", strconv.Itoa(macosCPUs(pod)),
 			"--memory", strconv.Itoa(macosMemMB(pod)),
 		}, port)
-		args = append(args, "--random-smbios", "--net", "tap", "--bridge", p.macosBridge(), spec.Image)
+		if storage := vm.NormalizeSizeArg(spec.Storage); storage != "" {
+			args = append(args, "--storage", storage)
+		}
+		args = append(args, "--exit-on-reboot", "--random-smbios", "--net", "tap", "--bridge", p.macosBridge(), spec.Image)
 		if out, err := p.macosExec(ctx, args...); err != nil {
 			// A failed inspect above is indistinguishable from a missing record,
 			// so this `vm run` may have merely collided with a live same-name
@@ -402,7 +405,8 @@ func (p *Provider) macosInspect(ctx context.Context, vmName string) *macosVMReco
 // startMacosVM boots a dead record, re-asserting the VNC display (launch-scoped
 // in cocoon-macos, a bare `vm start` disables it); port 0 leaves VNC off.
 func (p *Provider) startMacosVM(ctx context.Context, vmName string, port int) (string, error) {
-	return p.macosExec(ctx, append(appendMacosVNCArg([]string{"vm", "start"}, port), vmName)...)
+	args := appendMacosVNCArg([]string{"vm", "start", "--exit-on-reboot"}, port)
+	return p.macosExec(ctx, append(args, vmName)...)
 }
 
 // macosExec runs a cocoon-macos subcommand. `vm run`/`vm start` detach from

@@ -92,6 +92,8 @@ func TestCreateMacosPodDispatchesRunAndRegisters(t *testing.T) {
 		"--name macos-demo",
 		"--cpus 4",
 		"--memory 8192",
+		"--storage 107374182400",
+		"--exit-on-reboot",
 		"--vnc 0",
 		"--random-smbios",
 		"--net tap --bridge cni0",
@@ -242,8 +244,8 @@ func TestCreateMacosPodStartsDeadRecord(t *testing.T) {
 	}
 	// VNC is launch-scoped in cocoon-macos: a bare `vm start` disables it while
 	// the vnc-port annotation still advertises the display.
-	if joined := strings.Join(starts[0], " "); !strings.Contains(joined, "--vnc 0") {
-		t.Errorf("`vm start` must re-assert the VNC display, got: %s", joined)
+	if joined := strings.Join(starts[0], " "); !strings.Contains(joined, "--vnc 0") || !strings.Contains(joined, "--exit-on-reboot") {
+		t.Errorf("`vm start` must re-assert VNC and managed reboot policy, got: %s", joined)
 	}
 	if len(macosCallsWithPrefix(all, "vm", "run")) != 0 {
 		t.Fatalf("dead record must not relaunch via `vm run` (disk corruption), got %v", all)
@@ -545,6 +547,7 @@ func macosSpec() meta.VMSpec {
 		VMName:    "macos-demo",
 		Image:     "macos-tahoe-26-img",
 		OS:        string(cocoonv1.OSMacos),
+		Storage:   "100Gi",
 		ProbePort: "2275",
 	}
 }
