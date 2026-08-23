@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -174,6 +175,17 @@ func TestFormatMacosArgsForLogRedactsPassword(t *testing.T) {
 	got := formatMacosArgsForLog([]string{"vm", "start", "--vnc", "1", "--vnc-password", "secret", "demo"})
 	if strings.Contains(got, "secret") || !strings.Contains(got, "--vnc-password <redacted>") {
 		t.Fatalf("redacted args = %q", got)
+	}
+}
+
+func TestConfigureMacosLifecycleCommandUsesGracefulCancellation(t *testing.T) {
+	cmd := exec.Command("true")
+	configureMacosLifecycleCommand(cmd)
+	if cmd.Cancel == nil {
+		t.Fatal("launch command has no graceful cancel function")
+	}
+	if cmd.WaitDelay != macosCommandCleanupGrace {
+		t.Fatalf("launch cleanup grace = %v, want %v", cmd.WaitDelay, macosCommandCleanupGrace)
 	}
 }
 
