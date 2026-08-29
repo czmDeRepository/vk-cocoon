@@ -357,6 +357,23 @@ func (c *CocoonCLI) WatchEvents(ctx context.Context) (<-chan VMEvent, error) {
 	return ch, nil
 }
 
+// NormalizeSizeArg converts K8s quantities (e.g. "20Gi") to plain byte counts
+// accepted by cocoon and cocoon-macos CLI size flags.
+func NormalizeSizeArg(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	q, err := resource.ParseQuantity(raw)
+	if err != nil {
+		return raw
+	}
+	if n := q.Value(); n > 0 {
+		return strconv.FormatInt(n, 10)
+	}
+	return raw
+}
+
 // removeStaleSnapshot rms the name holder, retrying only the lease-held refusal
 // until the killed save's orphaned child dies; other failures report immediately.
 func (c *CocoonCLI) removeStaleSnapshot(ctx context.Context, ref string) error {
@@ -582,21 +599,4 @@ func snapshotNameHolderID(out string) string {
 		}
 	}
 	return ""
-}
-
-// NormalizeSizeArg converts K8s quantities (e.g. "20Gi") to plain byte counts
-// accepted by cocoon and cocoon-macos CLI size flags.
-func NormalizeSizeArg(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	q, err := resource.ParseQuantity(raw)
-	if err != nil {
-		return raw
-	}
-	if n := q.Value(); n > 0 {
-		return strconv.FormatInt(n, 10)
-	}
-	return raw
 }

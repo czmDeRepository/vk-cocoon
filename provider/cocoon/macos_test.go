@@ -41,6 +41,33 @@ func TestIsMacosSpec(t *testing.T) {
 	}
 }
 
+func TestMacosCPUsNormalizesUnsupportedCounts(t *testing.T) {
+	tests := []struct {
+		name string
+		cpu  string
+		want int
+	}{
+		{name: "default", want: macosDefaultCPUs},
+		{name: "minimum supported", cpu: "1", want: 2},
+		{name: "odd rounds down", cpu: "3", want: 2},
+		{name: "even unchanged", cpu: "4", want: 4},
+		{name: "fraction rounds up to even", cpu: "3500m", want: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := newPodWithSpec(macosSpec())
+			if tt.cpu != "" {
+				pod.Spec.Containers = []corev1.Container{{Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(tt.cpu)},
+				}}}
+			}
+			if got := macosCPUs(pod); got != tt.want {
+				t.Fatalf("macosCPUs(%q) = %d, want %d", tt.cpu, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClaimMacosVNCPort(t *testing.T) {
 	p := newTestProvider(t)
 	if got := p.claimMacosVNCPort("ns/a", 0); got != 5900 {
@@ -279,9 +306,12 @@ func TestCreateMacosPodStartsDeadRecord(t *testing.T) {
 		t.Fatalf("dead record must dispatch `vm start`, got %v", all)
 	}
 	// VNC is launch-scoped in cocoon-macos: a bare `vm start` disables it while
-	// the vnc-port annotation still advertises the display.
-	if joined := strings.Join(starts[0], " "); !strings.Contains(joined, "--exit-on-reboot --vnc 0 --vnc-password testpass") {
-		t.Errorf("`vm start` must re-assert protected VNC and managed reboot policy, got: %s", joined)
+	// the vnc-port annotation still advertises the display. Create-time storage
+	// and reboot policy are persisted in the VM record and must not be repeated.
+	if joined := strings.Join(starts[0], " "); !strings.Contains(joined, "--vnc 0 --vnc-password testpass") {
+		t.Errorf("`vm start` must re-assert protected VNC, got: %s", joined)
+	} else if strings.Contains(joined, "--exit-on-reboot") || strings.Contains(joined, "--storage") {
+		t.Errorf("`vm start` must rely on persisted storage/reboot policy, got: %s", joined)
 	}
 	if len(macosCallsWithPrefix(all, "vm", "run")) != 0 {
 		t.Fatalf("dead record must not relaunch via `vm run` (disk corruption), got %v", all)

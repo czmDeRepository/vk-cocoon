@@ -84,10 +84,12 @@ func main() {
 	metricsAddr := commonk8s.EnvOrDefault("VK_METRICS_ADDR", defaultMetricsAddr)
 	ociRegistry := os.Getenv("OCI_REGISTRY")
 	leasesPath := commonk8s.EnvOrDefault("VK_LEASES_PATH", network.DefaultLeasesPath)
-	controlSocket := commonk8s.EnvOrDefault("VK_COCOON_NET_CONTROL_SOCKET", network.DefaultControlSocket)
+	controlSocket := network.DefaultControlSocket
+	if configured, ok := os.LookupEnv("VK_COCOON_NET_CONTROL_SOCKET"); ok {
+		controlSocket = configured
+	}
 	cocoonBin := commonk8s.EnvOrDefault("VK_COCOON_BIN", "")
 	macosBin := commonk8s.EnvOrDefault("VK_COCOON_MACOS_BIN", "")
-	macosBridge := commonk8s.EnvOrDefault("COCOON_MACOS_BRIDGE", "")
 	macosVNCPassword := os.Getenv("COCOON_MACOS_VNC_PASSWORD")
 	orphanPolicy := commonk8s.EnvOrDefault("VK_ORPHAN_POLICY", defaultOrphanPolicy)
 	restoreMode := commonk8s.EnvOrDefault("VK_RESTORE_MODE", defaultRestoreMode)
@@ -153,7 +155,6 @@ func main() {
 		controlSocket:              controlSocket,
 		cocoonBin:                  cocoonBin,
 		macosBin:                   macosBin,
-		macosBridge:                macosBridge,
 		macosVNCPassword:           macosVNCPassword,
 		orphanPolicy:               orphanPolicy,
 		restoreMode:                restoreMode,
@@ -262,7 +263,6 @@ type buildOpts struct {
 	controlSocket              string
 	cocoonBin                  string
 	macosBin                   string
-	macosBridge                string
 	macosVNCPassword           string
 	orphanPolicy               string
 	restoreMode                string
@@ -299,7 +299,6 @@ func buildProvider(ctx context.Context, opts buildOpts) (*cocoon.Provider, error
 	p.Recorder = opts.recorder
 	p.Runtime = runtime
 	p.MacosBin = opts.macosBin
-	p.MacosBridge = opts.macosBridge
 	p.MacosVNCPassword = opts.macosVNCPassword
 	transfer := snapshots.TransferConfigFromEnv()
 	p.Puller = &snapshots.Puller{Registry: registry, Runtime: runtime, Transfer: transfer}

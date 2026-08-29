@@ -148,9 +148,13 @@ func (p *Provider) createMacosPod(ctx context.Context, pod *corev1.Pod, spec met
 		if err := p.ensureMacosImage(ctx, spec.Image); err != nil {
 			return p.failCreate(ctx, pod, false, "CreateBringUpFailed", err)
 		}
+		cpus := macosCPUs(pod)
+		if requested, _ := vmResourceOverrides(pod); requested > 0 && requested != cpus {
+			logger.Warnf(ctx, "%s: macOS requires an even vCPU count; normalized %d to %d", key, requested, cpus)
+		}
 		args, err := p.appendMacosVNCArgs([]string{
 			"vm", "run", "--name", spec.VMName,
-			"--cpus", strconv.Itoa(macosCPUs(pod)),
+			"--cpus", strconv.Itoa(cpus),
 			"--memory", strconv.Itoa(macosMemMB(pod)),
 		}, port)
 		if err != nil {
@@ -177,7 +181,7 @@ func (p *Provider) createMacosPod(ctx context.Context, pod *corev1.Pod, spec met
 	now := metav1.Now()
 	pod.Status.StartTime = &now
 	p.mu.Unlock()
-	// Ready defers to the SSH probe (a cold macOS boot takes minutes); the
+	// Ready defers to the configured readiness probe (a cold macOS boot takes minutes); the
 	// first probe already ran in registerMacosVM and onUpdate only fires on
 	// transitions, so an already-reachable adoption needs this explicit publish.
 	p.publishMacosReadiness(ctx, pod.Namespace, pod.Name)
@@ -192,8 +196,7 @@ func (p *Provider) macosAlreadyTracked(key, vmName string) bool {
 	return isMacosVM(v) && v.Name == vmName
 }
 
-// registerMacosVM tracks the guest, publishes VMID/IP/VNC annotations, and
-// starts the SSH readiness probe.
+// registerMacosVM tracks the guest, publishes VMID/IP/VNC annotations, and starts the macOS readiness probe.
 func (p *Provider) registerMacosVM(ctx context.Context, pod *corev1.Pod, spec meta.VMSpec, rec *macosVMRecord, vncPort int) {
 	v := &vm.VM{
 		ID:         macosVMID(spec.VMName),
@@ -294,7 +297,7 @@ func (p *Provider) buildMacosOnUpdate(namespace, name string) probes.OnUpdate {
 	}
 }
 
-// publishMacosReadiness flips lifecycle-state=ready on a green SSH probe; the
+// publishMacosReadiness flips lifecycle-state=ready on a green macOS probe; the
 // generic buildOnUpdate only refreshes status, leaving the annotation at creating.
 func (p *Provider) publishMacosReadiness(ctx context.Context, namespace, name string) {
 	pod, err := p.GetPod(ctx, namespace, name)
@@ -413,9 +416,10 @@ func (p *Provider) macosInspect(ctx context.Context, vmName string) *macosVMReco
 }
 
 // startMacosVM boots a dead record, re-asserting the VNC display (launch-scoped
-// in cocoon-macos, a bare `vm start` disables it); port 0 leaves VNC off.
+// in cocoon-macos, a bare `vm start` disables it); persisted create-time policy,
+// including exit-on-reboot, is restored from the record. Port 0 leaves VNC off.
 func (p *Provider) startMacosVM(ctx context.Context, vmName string, port int) (string, error) {
-	args, err := p.appendMacosVNCArgs([]string{"vm", "start", "--exit-on-reboot"}, port)
+	args, err := p.appendMacosVNCArgs([]string{"vm", "start"}, port)
 	if err != nil {
 		return "", err
 	}
@@ -430,7 +434,7 @@ func (p *Provider) macosExec(ctx context.Context, args ...string) (string, error
 		return p.macosExecFn(ctx, args...)
 	}
 	isLaunch := len(args) >= 2 && args[0] == "vm" && (args[1] == "run" || args[1] == "start")
-	isLifecycleMutation := isLaunch || len(args) >= 2 && args[0] == "vm" && args[1] == "rm"
+	isLifecycleMutation := isLaunch || (len(args) >= 2 && args[0] == "vm" && args[1] == "rm")
 	if isLaunch {
 		var cancel context.CancelFunc
 		ctx, cancel = detachedLaunchCtx(ctx)
@@ -450,20 +454,21 @@ func (p *Provider) macosExec(ctx context.Context, args ...string) (string, error
 	return stdout.String(), nil
 }
 
-// configureMacosLifecycleCommand gives cocoon-macos time to unwind its mounts,
-// NBD mappings and VM transaction after cancellation. CommandContext's
-// default immediate SIGKILL skips Go defers and strands those resources.
-func configureMacosLifecycleCommand(cmd *exec.Cmd) {
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
+func (p *Provider) appendMacosVNCArgs(args []string, port int) ([]string, error) {
+	if port != 0 {
+		if p.MacosVNCPassword == "" {
+			return nil, errors.New("COCOON_MACOS_VNC_PASSWORD must be set when macOS VNC is enabled")
 		}
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			return err
+		if len([]byte(p.MacosVNCPassword)) > maxVNCPasswordBytes {
+			return nil, fmt.Errorf("COCOON_MACOS_VNC_PASSWORD must be at most %d bytes", maxVNCPasswordBytes)
 		}
-		return nil
+		// argv exposure is acceptable because nodes have no unprivileged local users and guests cannot read host /proc.
+		args = append(args,
+			"--vnc", strconv.Itoa(port-macosVNCPortBase),
+			"--vnc-password", p.MacosVNCPassword,
+		)
 	}
-	cmd.WaitDelay = macosCommandCleanupGrace
+	return args, nil
 }
 
 func (p *Provider) macosProcessAlive(pid int) bool {
@@ -478,6 +483,20 @@ func (p *Provider) macosProcessAlive(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// configureMacosLifecycleCommand swaps CommandContext's SIGKILL for SIGTERM + a bounded wait: cocoon-macos traps SIGTERM and unwinds mounts/NBD/VM state.
+func configureMacosLifecycleCommand(cmd *exec.Cmd) {
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		return nil
+	}
+	cmd.WaitDelay = macosCommandCleanupGrace
 }
 
 // macosVMRecord is the subset of cocoon-macos `vm inspect` JSON needed for
@@ -512,7 +531,10 @@ func isMacosVM(v *vm.VM) bool { return v != nil && v.Hypervisor == macosHypervis
 
 func macosCPUs(pod *corev1.Pod) int {
 	if cpus, _ := vmResourceOverrides(pod); cpus > 0 {
-		return cpus
+		// This QEMU/OpenCore stack only boots positive even vCPU counts. Round
+		// down so normalization never grants more integer vCPUs than requested;
+		// one vCPU uses the minimum supported topology instead of hanging.
+		return max(cpus-cpus%2, 2)
 	}
 	return macosDefaultCPUs
 }
@@ -528,22 +550,6 @@ func macosMemMB(pod *corev1.Pod) int {
 		}
 	}
 	return macosDefaultMemMB
-}
-
-func (p *Provider) appendMacosVNCArgs(args []string, port int) ([]string, error) {
-	if port != 0 {
-		if p.MacosVNCPassword == "" {
-			return nil, errors.New("COCOON_MACOS_VNC_PASSWORD must be set when macOS VNC is enabled")
-		}
-		if len([]byte(p.MacosVNCPassword)) > maxVNCPasswordBytes {
-			return nil, fmt.Errorf("COCOON_MACOS_VNC_PASSWORD must be at most %d bytes", maxVNCPasswordBytes)
-		}
-		args = append(args,
-			"--vnc", strconv.Itoa(port-macosVNCPortBase),
-			"--vnc-password", p.MacosVNCPassword,
-		)
-	}
-	return args, nil
 }
 
 func formatMacosArgsForLog(args []string) string {
