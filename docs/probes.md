@@ -19,12 +19,10 @@ The `probes/` package owns that loop:
       every tick and write the current address back via `setVMIP`; the
       tracked IP is only a cache. Static NICs keep their inspected IP.
    3. If the pod carries a `vm.cocoonstack.io/probe-port` annotation, dial
-      TCP on that port instead of ICMP. Otherwise fall back to
-      `Pinger.Ping(ctx, ip)` — a single ICMPv4 echo. This matches the
-      cocoon Windows golden image contract
-      (`windows/autounattend.xml` explicitly opens `icmpv4:8` and disables
-      all firewall profiles), and it decouples readiness from specific
-      services so the same probe works for Linux and Windows guests alike.
+      TCP on that port. IPv6-only Windows guests without an explicit port use
+      the Control Server on `:5000`, matching the create/wake readiness gate;
+      this avoids treating a blocked ICMPv6 echo as an application outage.
+      Other guests fall back to one IPv4 or IPv6 ICMP echo.
 
    `os=macos` pods get a different closure: the probe dials the guest's
    own sshd on `:22`, requiring the `SSH-` banner — a cold macOS boot
@@ -48,9 +46,7 @@ The `probes/` package owns that loop:
 
 If the ICMP raw socket cannot be opened — typically because the binary is
 running without `CAP_NET_RAW` — the provider falls back to
-`network.NopPinger` and the probe degrades to "an IP was resolved ==
-Ready". That is weaker than a real end-to-end ping but still strictly
-better than the previous behaviour of marking the pod Ready the instant
-`cocoon vm clone/run` returned. The systemd unit in
-`packaging/vk-cocoon.service` grants `AmbientCapabilities=CAP_NET_RAW` so
-the production path gets the real pinger.
+`network.NopPinger` and ICMP-based probes degrade to "an IP was resolved ==
+Ready". TCP probes, including the IPv6-only Windows `:5000` default, are
+unchanged. The systemd unit grants `AmbientCapabilities=CAP_NET_RAW` so the
+production path gets real IPv4/IPv6 ICMP checks where they are selected.

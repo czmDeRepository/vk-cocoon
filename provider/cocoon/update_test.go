@@ -405,6 +405,26 @@ func TestHibernateReleasesLeaseBeforeNICDrop(t *testing.T) {
 	}
 }
 
+func TestIPv6OnlyWindowsUsesDHCPv6LifecycleCommands(t *testing.T) {
+	rt := &fakeRuntime{}
+	p := newTestProvider(t)
+	p.Runtime = rt
+	p.NetworkMode = networkModeIPv6Only
+
+	if err := p.execGuestIpconfig(t.Context(), "vmid-1", "release"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.execGuestIpconfig(t.Context(), "vmid-1", "renew"); err != nil {
+		t.Fatal(err)
+	}
+	if got := execArgvs(rt); !slices.Equal(got, []string{
+		"cmd /c ipconfig /release6",
+		"cmd /c ipconfig /renew6",
+	}) {
+		t.Fatalf("exec calls = %v", got)
+	}
+}
+
 func TestHibernateReleaseFailureDoesNotBlock(t *testing.T) {
 	rt := &fakeRuntime{execErr: errors.New("agent down")}
 	p := newTestProvider(t)

@@ -398,6 +398,9 @@ func (p *Provider) waitForFreshIP(ctx context.Context, pod *corev1.Pod, vmID str
 func (p *Provider) execGuestIpconfig(ctx context.Context, vmID, verb string) error {
 	ctx, cancel := context.WithTimeout(ctx, guestIpconfigTimeout)
 	defer cancel()
+	if p.NetworkMode == networkModeIPv6Only && (verb == "release" || verb == "renew") {
+		verb += "6"
+	}
 	var out bytes.Buffer
 	if err := p.Runtime.Exec(ctx, vmID, []string{"cmd", "/c", "ipconfig /" + verb}, nil, nil, &out, &out); err != nil {
 		// Surface the guest-side reason ("The RPC server is unavailable", ...).

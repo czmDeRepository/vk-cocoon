@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func TestBuildPostCloneCommands(t *testing.T) {
 			{MAC: "aa:bb:cc:00:11:22", Network: &vm.NetworkInfo{IP: "10.0.0.2", Prefix: 24, Gateway: "10.0.0.1"}},
 			{MAC: "aa:bb:cc:00:11:33", Network: &vm.NetworkInfo{IP: "10.0.0.3", Prefix: 24, Gateway: "10.0.0.1"}},
 		}
-		cmds := buildPostCloneCommands("my-vm", vm.BackendFirecracker, "x", "", nics)
+		cmds := buildPostCloneCommandsForMode("my-vm", vm.BackendFirecracker, "x", "", nics, networkModeIPv4NAT64)
 
 		if !strings.Contains(cmds, "ip link set dev eth0") {
 			t.Errorf("missing MAC fixup for eth0")
@@ -70,7 +71,7 @@ func TestBuildPostCloneCommands(t *testing.T) {
 
 	t.Run("CH + DHCP + 1 NIC", func(t *testing.T) {
 		nics := []*vm.NetworkConfig{{MAC: "aa:bb:cc:dd:ee:ff"}}
-		cmds := buildPostCloneCommands("clone-vm", "cloud-hypervisor", "x", "", nics)
+		cmds := buildPostCloneCommandsForMode("clone-vm", "cloud-hypervisor", "x", "", nics, networkModeIPv4NAT64)
 
 		if strings.Contains(cmds, "ip link set") {
 			t.Errorf("CH should not have MAC fixup")
@@ -80,9 +81,23 @@ func TestBuildPostCloneCommands(t *testing.T) {
 		}
 	})
 
+	t.Run("CH + IPv6-only DHCP + 1 NIC", func(t *testing.T) {
+		nics := []*vm.NetworkConfig{{MAC: "aa:bb:cc:dd:ee:ff"}}
+		cmds := buildPostCloneCommandsForMode("clone-vm", "cloud-hypervisor", "x", "", nics, networkModeIPv6Only)
+
+		for _, want := range []string{"DHCP=ipv6", "IPv6AcceptRA=yes", "DUIDType=link-layer"} {
+			if !strings.Contains(cmds, want) {
+				t.Errorf("missing %q in IPv6-only network config: %s", want, cmds)
+			}
+		}
+		if strings.Contains(cmds, "DHCP=ipv4") {
+			t.Errorf("IPv6-only network config still enables DHCPv4: %s", cmds)
+		}
+	})
+
 	t.Run("CH + cloudimg (from sourceImage)", func(t *testing.T) {
 		nics := []*vm.NetworkConfig{{MAC: "aa:bb:cc:dd:ee:ff"}}
-		cmds := buildPostCloneCommands("ci-vm", "cloud-hypervisor", "x", "https://cloud-images.ubuntu.com/img.img", nics)
+		cmds := buildPostCloneCommandsForMode("ci-vm", "cloud-hypervisor", "x", "https://cloud-images.ubuntu.com/img.img", nics, networkModeIPv4NAT64)
 
 		if !strings.Contains(cmds, "cloud-init clean") {
 			t.Errorf("cloudimg should use cloud-init clean")
@@ -100,7 +115,7 @@ func TestBuildPostCloneCommands(t *testing.T) {
 			{MAC: "aa:00:00:00:00:01", Network: &vm.NetworkInfo{IP: "10.0.0.5", Prefix: 16, Gateway: "10.0.0.1"}},
 			{MAC: "aa:00:00:00:00:02"},
 		}
-		cmds := buildPostCloneCommands("mixed", vm.BackendFirecracker, "x", "", nics)
+		cmds := buildPostCloneCommandsForMode("mixed", vm.BackendFirecracker, "x", "", nics, networkModeIPv4NAT64)
 
 		if !strings.Contains(cmds, "Address=10.0.0.5/16") {
 			t.Errorf("missing static config")
@@ -152,7 +167,7 @@ func TestPlanPostClone(t *testing.T) {
 
 	t.Run("Linux CH OCI DHCP — resolver repair plan", func(t *testing.T) {
 		v := &vm.VM{ID: "x", NetworkConfigs: dhcpNIC}
-		plan, ok := planPostClone(meta.VMSpec{Backend: "cloud-hypervisor"}, v, "")
+		plan, ok := planPostCloneForMode(meta.VMSpec{Backend: "cloud-hypervisor"}, v, "", networkModeIPv4NAT64)
 		if !ok {
 			t.Fatal("Linux clones must repair resolver configuration before Ready")
 		}
@@ -166,7 +181,7 @@ func TestPlanPostClone(t *testing.T) {
 
 	t.Run("Linux CH cloudimg DHCP — resolver repair plan", func(t *testing.T) {
 		v := &vm.VM{ID: "x", NetworkConfigs: dhcpNIC}
-		plan, ok := planPostClone(meta.VMSpec{OS: "linux", Backend: "cloud-hypervisor"}, v, "https://cloud-images.ubuntu.com/img.img")
+		plan, ok := planPostCloneForMode(meta.VMSpec{OS: "linux", Backend: "cloud-hypervisor"}, v, "https://cloud-images.ubuntu.com/img.img", networkModeIPv4NAT64)
 		if !ok {
 			t.Fatal("Linux cloudimg clones must repair resolver configuration before Ready")
 		}
@@ -177,7 +192,7 @@ func TestPlanPostClone(t *testing.T) {
 
 	t.Run("Linux CH static — sh -c plan", func(t *testing.T) {
 		v := &vm.VM{ID: "x", NetworkConfigs: staticNIC}
-		plan, ok := planPostClone(meta.VMSpec{Backend: "cloud-hypervisor", VMName: "vm"}, v, "")
+		plan, ok := planPostCloneForMode(meta.VMSpec{Backend: "cloud-hypervisor", VMName: "vm"}, v, "", networkModeIPv4NAT64)
 		if !ok {
 			t.Fatalf("static-IP should produce a plan")
 		}
@@ -194,7 +209,7 @@ func TestPlanPostClone(t *testing.T) {
 
 	t.Run("Android CH DHCP — no plan", func(t *testing.T) {
 		v := &vm.VM{ID: "x", NetworkConfigs: dhcpNIC}
-		_, ok := planPostClone(meta.VMSpec{OS: "android", Backend: "cloud-hypervisor"}, v, "")
+		_, ok := planPostCloneForMode(meta.VMSpec{OS: "android", Backend: "cloud-hypervisor"}, v, "", networkModeIPv4NAT64)
 		if ok {
 			t.Errorf("Android CH+DHCP should not run Linux resolver repair")
 		}
@@ -202,7 +217,7 @@ func TestPlanPostClone(t *testing.T) {
 
 	t.Run("Windows — PowerShell PnP-rebind", func(t *testing.T) {
 		v := &vm.VM{ID: "x", NetworkConfigs: dhcpNIC}
-		plan, ok := planPostClone(meta.VMSpec{OS: "windows"}, v, "")
+		plan, ok := planPostCloneForMode(meta.VMSpec{OS: "windows"}, v, "", networkModeIPv4NAT64)
 		if !ok {
 			t.Fatalf("Windows should always produce a plan (chained-clone NDIS unstick)")
 		}
@@ -219,11 +234,62 @@ func TestPlanPostClone(t *testing.T) {
 			t.Errorf("Windows hint should single-quote the script body, got %q", plan.hint)
 		}
 	})
+
+	t.Run("Windows IPv6-only — disable IPv4 and renew DHCPv6", func(t *testing.T) {
+		v := &vm.VM{ID: "x", NetworkConfigs: dhcpNIC}
+		plan, ok := planPostCloneForMode(meta.VMSpec{OS: "windows"}, v, "", networkModeIPv6Only)
+		if !ok {
+			t.Fatal("Windows IPv6-only should produce a post-clone plan")
+		}
+		for _, want := range []string{
+			"Dhcpv6DUID", "[byte[]](0,1,0,1)", "ToUnixTimeSeconds",
+			"Enable-NetAdapterBinding -ComponentID ms_tcpip6",
+			"Disable-NetAdapterBinding -ComponentID ms_tcpip",
+			"ipconfig /renew6",
+		} {
+			if !strings.Contains(plan.argv[3], want) {
+				t.Errorf("Windows IPv6-only script missing %q: %q", want, plan.argv[3])
+			}
+		}
+		if duid := strings.Index(plan.argv[3], "Dhcpv6DUID"); duid < 0 || duid > strings.Index(plan.argv[3], "Disable-PnpDevice") {
+			t.Errorf("DHCPv6 DUID must be replaced before the adapter rebind: %q", plan.argv[3])
+		}
+		for _, unwanted := range []string{"portproxy", "iphlpsvc"} {
+			if strings.Contains(plan.argv[3], unwanted) {
+				t.Errorf("portable image setup must not contain %q: %q", unwanted, plan.argv[3])
+			}
+		}
+	})
+}
+
+func TestNeedsGuestSetupOnCreate(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		spec        meta.VMSpec
+		cloned      bool
+		networkMode string
+		want        bool
+	}{
+		{name: "IPv4 run Linux", spec: meta.VMSpec{OS: "linux", Mode: "run"}, networkMode: networkModeIPv4NAT64},
+		{name: "IPv6-only run Linux", spec: meta.VMSpec{OS: "linux", Mode: "run"}, networkMode: networkModeIPv6Only, want: true},
+		{name: "IPv6-only run Windows", spec: meta.VMSpec{OS: "windows", Mode: "run"}, networkMode: networkModeIPv6Only, want: true},
+		{name: "IPv6-only run Android", spec: meta.VMSpec{OS: "android", Mode: "run"}, networkMode: networkModeIPv6Only},
+		{name: "IPv4 clone Android", spec: meta.VMSpec{OS: "android", Mode: "clone"}, cloned: true, networkMode: networkModeIPv4NAT64, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := needsGuestSetupOnCreate(tc.spec, tc.cloned, tc.networkMode); got != tc.want {
+				t.Errorf("needsGuestSetupOnCreate(%+v, cloned=%v, mode=%q) = %v, want %v", tc.spec, tc.cloned, tc.networkMode, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestBuildLinuxResolverRepairCommand(t *testing.T) {
 	t.Parallel()
-	cmd := buildLinuxResolverRepairCommand()
+	cmd := buildLinuxResolverRepairCommand(networkModeIPv4NAT64)
 	for _, want := range []string{
 		"systemctl is-active --quiet systemd-resolved",
 		"systemctl is-enabled --quiet systemd-resolved",
@@ -236,6 +302,38 @@ func TestBuildLinuxResolverRepairCommand(t *testing.T) {
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("resolver repair command missing %q: %q", want, cmd)
+		}
+	}
+}
+
+func TestBuildLinuxResolverRepairCommandIPv6Only(t *testing.T) {
+	t.Parallel()
+	cmd := buildLinuxResolverRepairCommand(networkModeIPv6Only)
+	for _, want := range []string{
+		"systemctl enable --now systemd-resolved",
+		"systemd-resolved did not publish resolv.conf",
+		"rm -f /etc/resolv.conf",
+		"ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("IPv6-only resolver command missing %q: %q", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "managed by man:systemd-resolved(8)") {
+		t.Errorf("IPv6-only mode must replace stale user-managed IPv4 resolvers: %q", cmd)
+	}
+}
+
+func TestBuildLinuxTXOffloadCommand(t *testing.T) {
+	t.Parallel()
+	cmd := buildLinuxTXOffloadCommand([]*vm.NetworkConfig{
+		{MAC: "AA:BB:CC:DD:EE:01"},
+		nil,
+		{MAC: "aa:bb:cc:dd:ee:02"},
+	})
+	for _, want := range []string{"command -v ethtool", "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02", `ethtool -K "$iface" tx off`} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("TX offload command missing %q: %q", want, cmd)
 		}
 	}
 }
@@ -270,6 +368,58 @@ func TestCreatePodWindowsRunModeSACFailureKeepsFailed(t *testing.T) {
 	}
 }
 
+func TestCreatePodWindowsIPv6OnlyRunDefersReadyUntilGuestSetup(t *testing.T) {
+	networkSetupStarted := make(chan struct{})
+	releaseNetworkSetup := make(chan struct{})
+	ready := make(chan struct{}, 1)
+	var execCount atomic.Int32
+	rt := &fakeRuntime{
+		runVM: &vm.VM{
+			ID: "vmid", Name: "vk-ns-win-0", IP: "fd00::10", MAC: "aa:bb:cc:dd:ee:ff",
+			NetworkConfigs: []*vm.NetworkConfig{{MAC: "aa:bb:cc:dd:ee:ff"}},
+		},
+		onExec: func() {
+			if execCount.Add(1) == 1 {
+				close(networkSetupStarted)
+				<-releaseNetworkSetup
+			}
+		},
+	}
+	p := newTestProvider(t)
+	p.Runtime = rt
+	p.NetworkMode = networkModeIPv6Only
+	p.notifyHook = func(updated *corev1.Pod) {
+		if updated.Annotations[meta.AnnotationLifecycleState] == string(meta.LifecycleStateReady) {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+		}
+	}
+
+	pod := newPodWithSpec(meta.VMSpec{VMName: "vk-ns-win-0", OS: "windows", Mode: "run"})
+	if err := p.CreatePod(t.Context(), pod); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	waitOrFatal(t, networkSetupStarted, "IPv6-only run guest setup")
+	status, err := p.GetPodStatus(t.Context(), pod.Namespace, pod.Name)
+	if err != nil {
+		t.Fatalf("GetPodStatus before setup: %v", err)
+	}
+	if isReady, _ := conditionStatus(status.Conditions, corev1.PodReady); isReady == corev1.ConditionTrue {
+		t.Fatal("IPv6-only run pod became Ready before guest network setup completed")
+	}
+
+	close(releaseNetworkSetup)
+	waitOrFatal(t, ready, "IPv6-only run readiness")
+	if len(rt.execCalls) != 1 {
+		t.Fatalf("guest setup Exec calls = %d, want 1", len(rt.execCalls))
+	}
+	if command := strings.Join(rt.execCalls[0].argv, " "); !strings.Contains(command, "Dhcpv6DUID") {
+		t.Errorf("Windows IPv6-only run setup missing DHCPv6 DUID refresh: %q", command)
+	}
+}
+
 func TestPostCloneErrorsAnnotationTruncated(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "demo-0", Namespace: "ns", Annotations: map[string]string{}}}
 	v := &vm.VM{ID: "vmid", NetworkConfigs: []*vm.NetworkConfig{{MAC: "aa:bb:cc:dd:ee:ff", Network: &vm.NetworkInfo{IP: "10.0.0.5", Prefix: 24, Gateway: "10.0.0.1"}}}}
@@ -280,7 +430,7 @@ func TestPostCloneErrorsAnnotationTruncated(t *testing.T) {
 	for i := range 80 {
 		errs = append(errs, fmt.Errorf("attempt %d: %s", i, strings.Repeat("x", 100)))
 	}
-	plan, ok := planPostClone(meta.VMSpec{Backend: "cloud-hypervisor", VMName: "vm"}, v, "")
+	plan, ok := planPostCloneForMode(meta.VMSpec{Backend: "cloud-hypervisor", VMName: "vm"}, v, "", networkModeIPv4NAT64)
 	if !ok {
 		t.Fatal("static-IP network config must need post-clone setup")
 	}
@@ -446,6 +596,25 @@ func TestMarkPostCloneStateDropsStaleIncarnation(t *testing.T) {
 
 	if got := podB.Annotations[annotationPostCloneState]; got != "" {
 		t.Errorf("successor post-clone-state = %q, want unset (stale incarnation write must drop)", got)
+	}
+}
+
+func TestMarkPostCloneStateKeepsCapturedPodInSync(t *testing.T) {
+	t.Parallel()
+
+	tracked := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "demo-0", Namespace: "ns", UID: "same", Annotations: map[string]string{}}}
+	captured := tracked.DeepCopy()
+	p := newTestProvider(t)
+	p.Clientset = fake.NewSimpleClientset(tracked.DeepCopy())
+	p.trackPod(tracked, nil)
+
+	p.markPostCloneState(t.Context(), captured, postCloneStateDone)
+
+	if got := tracked.Annotations[annotationPostCloneState]; got != postCloneStateDone {
+		t.Errorf("tracked post-clone-state = %q, want %q", got, postCloneStateDone)
+	}
+	if got := captured.Annotations[annotationPostCloneState]; got != postCloneStateDone {
+		t.Errorf("captured post-clone-state = %q, want %q", got, postCloneStateDone)
 	}
 }
 

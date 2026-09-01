@@ -83,6 +83,30 @@ func TestGetPodStatusGatesProbeReadyUntilLifecycleReady(t *testing.T) {
 	}
 }
 
+func TestProbePortDefaultsWindowsIPv6OnlyToControlServer(t *testing.T) {
+	p := newTestProvider(t)
+	p.NetworkMode = networkModeIPv6Only
+	pod := newPodWithSpec(meta.VMSpec{VMName: "vk-ns-win-0", Mode: "run", OS: "windows"})
+	p.trackPod(pod, &vm.VM{ID: "vmid", Name: "vk-ns-win-0", IP: "fd00::10"})
+
+	if got := p.probePort(pod.Namespace, pod.Name); got != windowsControlPort {
+		t.Fatalf("probePort() = %q, want Windows Control Server port %q", got, windowsControlPort)
+	}
+}
+
+func TestProbePortKeepsExplicitWindowsOverride(t *testing.T) {
+	p := newTestProvider(t)
+	p.NetworkMode = networkModeIPv6Only
+	pod := newPodWithSpec(meta.VMSpec{
+		VMName: "vk-ns-win-0", Mode: "run", OS: "windows", ProbePort: "8443",
+	})
+	p.trackPod(pod, &vm.VM{ID: "vmid", Name: "vk-ns-win-0", IP: "fd00::10"})
+
+	if got := p.probePort(pod.Namespace, pod.Name); got != "8443" {
+		t.Fatalf("probePort() = %q, want explicit port 8443", got)
+	}
+}
+
 func runningPodStatus(ready corev1.ConditionStatus) corev1.PodStatus {
 	now := metav1.Now()
 	return corev1.PodStatus{

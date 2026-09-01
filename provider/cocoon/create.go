@@ -107,22 +107,23 @@ func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	p.applyRuntime(ctx, pod, v)
 	// Capture isClonedBoot before goroutines mutate pod.Annotations.
 	cloned := isClonedBoot(pod, spec)
+	guestSetup := needsGuestSetupOnCreate(spec, cloned, p.NetworkMode)
 	// trackPod first: goroutines below call markLifecycleState, which reads p.pods[key].
 	p.trackPod(pod, v)
 	willRunSAC := p.willRunSAC(spec, v)
 	if restoring {
 		p.dispatchHibernateRestore(pod, spec, v, "create")
 	}
-	if spec.OS == string(cocoonv1.OSWindows) && !restoring && !cloned {
+	if spec.OS == string(cocoonv1.OSWindows) && !restoring && !guestSetup {
 		p.goBackground(func() {
 			ran, ok := p.runWindowsSAC(p.lifecycleCtx, pod, v, "create")
-			// Non-clone Ready was deferred to here so watchers don't see a transient Ready.
+			// Ready was deferred to here so watchers don't see a transient Ready.
 			if ok && ran && !p.lifecycleAlreadyFailed(pod) {
 				p.markReadyPublished(p.lifecycleCtx, pod)
 			}
 		})
 	}
-	if cloned && !restoring {
+	if guestSetup && !restoring {
 		p.goBackground(func() {
 			p.runPostCloneSetup(p.lifecycleCtx, pod, spec, v, sourceImage, "create", false)
 		})
@@ -137,9 +138,9 @@ func (p *Provider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	now := metav1.Now()
 	pod.Status.StartTime = &now
 	p.mu.Unlock()
-	// Cloned defers Ready to runPostCloneSetup; Windows+static defers to applyWindowsStaticIP;
-	// restore defers to dispatchHibernateRestore.
-	if !cloned && !willRunSAC && !restoring && !p.lifecycleAlreadyFailed(pod) {
+	// Clones and IPv6-only Linux/Windows boots defer Ready to runPostCloneSetup;
+	// Windows+static defers to applyWindowsStaticIP; restore defers to dispatchHibernateRestore.
+	if !guestSetup && !willRunSAC && !restoring && !p.lifecycleAlreadyFailed(pod) {
 		p.markReadyPublished(ctx, pod)
 	} else {
 		p.refreshStatus(ctx, pod)

@@ -93,6 +93,10 @@ func main() {
 	macosVNCPassword := os.Getenv("COCOON_MACOS_VNC_PASSWORD")
 	orphanPolicy := commonk8s.EnvOrDefault("VK_ORPHAN_POLICY", defaultOrphanPolicy)
 	restoreMode := commonk8s.EnvOrDefault("VK_RESTORE_MODE", defaultRestoreMode)
+	networkMode := commonk8s.EnvOrDefault("VK_NETWORK_MODE", "IPv4NAT64")
+	if networkMode != "IPv4NAT64" && networkMode != "IPv6Only" {
+		logger.Fatalf(ctx, errors.New("unsupported network mode"), "invalid VK_NETWORK_MODE %q", networkMode)
+	}
 	stagingDir := commonk8s.EnvOrDefault("VK_STAGING_DIR", defaultStagingDir)
 	peerAddr := commonk8s.EnvOrDefault("VK_PEER_ADDR", defaultPeerAddr)
 	cocoonSnapshotDir := commonk8s.EnvOrDefault("VK_COCOON_SNAPSHOT_DIR", defaultCocoonSnapshotDir)
@@ -158,6 +162,7 @@ func main() {
 		macosVNCPassword:           macosVNCPassword,
 		orphanPolicy:               orphanPolicy,
 		restoreMode:                restoreMode,
+		networkMode:                networkMode,
 		stagingDir:                 stagingDir,
 		peerPort:                   peerPort,
 		clientset:                  clientset,
@@ -266,6 +271,7 @@ type buildOpts struct {
 	macosVNCPassword           string
 	orphanPolicy               string
 	restoreMode                string
+	networkMode                string
 	stagingDir                 string
 	peerPort                   string
 	clientset                  kubernetes.Interface
@@ -295,6 +301,7 @@ func buildProvider(ctx context.Context, opts buildOpts) (*cocoon.Provider, error
 	p := cocoon.NewProvider(ctx)
 	p.NodeName = opts.nodeName
 	p.SnapshotCompatibilityClass = opts.snapshotCompatibilityClass
+	p.NetworkMode = opts.networkMode
 	p.Clientset = opts.clientset
 	p.Recorder = opts.recorder
 	p.Runtime = runtime

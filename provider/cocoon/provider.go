@@ -35,6 +35,10 @@ import (
 )
 
 const (
+	networkModeIPv4NAT64 = "IPv4NAT64"
+	networkModeIPv6Only  = "IPv6Only"
+	windowsControlPort   = "5000"
+
 	// restartCooldown prevents tight restart loops when a VM keeps crashing.
 	restartCooldown = 30 * time.Second
 
@@ -76,6 +80,7 @@ const (
 type Provider struct {
 	NodeName                   string
 	SnapshotCompatibilityClass string
+	NetworkMode                string
 
 	OrphanPolicy provider.OrphanPolicy
 	RestoreMode  vm.RestoreMode
@@ -440,7 +445,16 @@ func (p *Provider) probePort(namespace, name string) string {
 	if !ok {
 		return ""
 	}
-	return pod.Annotations[meta.AnnotationProbePort]
+	if port := pod.Annotations[meta.AnnotationProbePort]; port != "" {
+		return port
+	}
+	// Windows IPv6-only guests may not answer ICMPv6 even though the agent is
+	// healthy. Their create/wake gate already requires Control Server on 5000,
+	// so keep the steady-state probe on that same end-to-end signal.
+	if p.NetworkMode == networkModeIPv6Only && meta.ParseVMSpec(pod).OS == "windows" {
+		return windowsControlPort
+	}
+	return ""
 }
 
 func (p *Provider) probeTCP(ctx context.Context, ip, port string) (bool, string) {

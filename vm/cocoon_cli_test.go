@@ -38,6 +38,48 @@ func TestIsCocoonNotFound(t *testing.T) {
 	}
 }
 
+func TestRemoveMapsVMNotFound(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cocoon")
+	payload := `#!/bin/sh
+echo 'Error: vm EWHRORO5YRAJXREXA5P6BAC4QL: vm not found' >&2
+exit 1
+`
+	if err := os.WriteFile(script, []byte(payload), 0o755); err != nil {
+		t.Fatalf("write fake cocoon: %v", err)
+	}
+	err := NewCocoonCLI(script).Remove(t.Context(), "EWHRORO5YRAJXREXA5P6BAC4QL")
+	if !errors.Is(err, ErrVMNotFound) {
+		t.Fatalf("Remove() error = %v, want ErrVMNotFound", err)
+	}
+}
+
+func TestRemovePreservesOtherErrors(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cocoon")
+	payload := `#!/bin/sh
+echo 'Error: remove data dir: input/output error' >&2
+exit 1
+`
+	if err := os.WriteFile(script, []byte(payload), 0o755); err != nil {
+		t.Fatalf("write fake cocoon: %v", err)
+	}
+	err := NewCocoonCLI(script).Remove(t.Context(), "vm-1")
+	if err == nil {
+		t.Fatal("Remove() must report a non-not-found failure")
+	}
+	if errors.Is(err, ErrVMNotFound) {
+		t.Fatalf("Remove() error = %v, must not map to ErrVMNotFound", err)
+	}
+	if !strings.Contains(err.Error(), "input/output error") {
+		t.Fatalf("Remove() error = %v, want command output", err)
+	}
+}
+
 func TestSnapshotNameTakenPhrases(t *testing.T) {
 	t.Parallel()
 

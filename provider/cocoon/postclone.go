@@ -36,9 +36,8 @@ const (
 	postCloneStateDone    = "done"
 	postCloneStateFailed  = "failed"
 
-	postCloneAgentBudget   = 180 * time.Second
-	postCloneRetryInterval = 3 * time.Second
-
+	postCloneAgentBudget     = 180 * time.Second
+	postCloneRetryInterval   = 3 * time.Second
 	postCloneKindWindows     = "windows"
 	postCloneKindLinuxStatic = "linux_static"
 	postCloneKindLinuxFC     = "linux_fc"
@@ -50,7 +49,7 @@ const (
 // runPostCloneSetup runs the cocoon-agent fixup and records post-clone-state;
 // on exhaustion it leaves a manual hint annotation for the operator.
 func (p *Provider) runPostCloneSetup(ctx context.Context, pod *corev1.Pod, spec meta.VMSpec, v *vm.VM, sourceImage, op string, wake bool) {
-	plan, ok := planPostClone(spec, v, sourceImage)
+	plan, ok := planPostCloneForMode(spec, v, sourceImage, p.NetworkMode)
 	if !ok {
 		p.markReadyAfterIP(ctx, pod, v, wake)
 		return
@@ -76,16 +75,14 @@ func (p *Provider) runPostCloneSetup(ctx context.Context, pod *corev1.Pod, spec 
 		select {
 		case execErr := <-done:
 			if execErr == nil {
+				if !p.finishWindowsPostClone(ctx, pod, spec, v, op) {
+					return
+				}
 				metrics.PostCloneTotal.WithLabelValues(kind, "ok").Inc()
 				metrics.PostCloneRetryAttempts.WithLabelValues("ok").Observe(float64(attempt))
 				logger.Infof(ctx, "post-clone setup succeeded for %s/%s vm=%s attempts=%d attempt_dur=%s total_dur=%s",
 					pod.Namespace, pod.Name, v.ID, attempt, time.Since(attemptStart).Round(time.Millisecond), time.Since(t0).Round(time.Millisecond))
 				p.markPostCloneState(ctx, pod, postCloneStateDone)
-				if spec.OS == string(cocoonv1.OSWindows) {
-					if _, ok := p.runWindowsSAC(ctx, pod, v, op); !ok {
-						return
-					}
-				}
 				if !p.lifecycleAlreadyFailed(pod) {
 					p.emitNormalf(pod, "PostCloneSucceeded", "kind=%s attempts=%d", kind, attempt)
 					p.markReadyAfterIP(ctx, pod, v, wake)
@@ -124,6 +121,14 @@ func (p *Provider) runPostCloneSetup(ctx context.Context, pod *corev1.Pod, spec 
 	p.emitWarningf(pod, "PostCloneExecExhausted", "%s", truncate(op+": "+joinedMsg, eventMessageMaxBytes))
 	p.markLifecycleState(ctx, pod, meta.LifecycleStateFailed, truncate(joinedMsg, lifecycleMessageMaxBytes))
 	logger.Errorf(ctx, joinedErr, "%s/%s post-clone exhausted", pod.Namespace, pod.Name)
+}
+
+func (p *Provider) finishWindowsPostClone(ctx context.Context, pod *corev1.Pod, spec meta.VMSpec, v *vm.VM, op string) bool {
+	if spec.OS != string(cocoonv1.OSWindows) {
+		return true
+	}
+	_, ok := p.runWindowsSAC(ctx, pod, v, op)
+	return ok
 }
 
 // markReadyAfterIP defers ready until the clone's DHCP lease lands, because
@@ -199,6 +204,15 @@ func (p *Provider) markPostCloneState(ctx context.Context, pod *corev1.Pod, stat
 		return
 	}
 	target.Annotations[annotationPostCloneState] = state
+	// Async lifecycle work can hold the original pod while UpdatePod replaces
+	// the tracked pointer. Keep both same-incarnation snapshots synchronized so
+	// a later notify(pod) cannot write an older post-clone state back.
+	if target != pod {
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[annotationPostCloneState] = state
+	}
 	p.mu.Unlock()
 	if err := p.patchPodAnnotations(ctx, pod.Namespace, pod.Name, map[string]any{annotationPostCloneState: state}); err != nil {
 		log.WithFunc("Provider.markPostCloneState").Errorf(ctx, err,
@@ -349,32 +363,47 @@ type postClonePlan struct {
 	hint string
 }
 
-// planPostClone returns ok=false when no fixup is needed. Linux clones always
-// repair the systemd-resolved handoff because a snapshot may preserve a plain
-// /etc/resolv.conf that bypasses the DNS servers delivered by DHCP.
-func planPostClone(spec meta.VMSpec, v *vm.VM, sourceImage string) (postClonePlan, bool) {
+// planPostCloneForMode returns ok=false when no fixup is needed. Linux clones
+// always repair the systemd-resolved handoff because a snapshot may preserve a
+// plain /etc/resolv.conf that bypasses the DNS servers delivered by DHCP.
+func planPostCloneForMode(spec meta.VMSpec, v *vm.VM, sourceImage, networkMode string) (postClonePlan, bool) {
 	if !postCloneNeeded(spec, v) {
 		return postClonePlan{}, false
 	}
 	if spec.OS == string(cocoonv1.OSWindows) {
-		argv := buildWindowsPostCloneArgv()
+		argv := buildWindowsPostCloneArgvForMode(networkMode)
 		return postClonePlan{argv: argv, hint: fmt.Sprintf("%s %s %s '%s'", argv[0], argv[1], argv[2], argv[3])}, true
 	}
 	var cmds []string
 	if needsPostClone(spec.Backend, v.NetworkConfigs) {
-		cmds = append(cmds, buildPostCloneCommands(spec.VMName, spec.Backend, v.ID, sourceImage, v.NetworkConfigs))
+		cmds = append(cmds, buildPostCloneCommandsForMode(spec.VMName, spec.Backend, v.ID, sourceImage, v.NetworkConfigs, networkMode))
 	}
 	if isLinuxSpec(spec) {
-		cmds = append(cmds, buildLinuxResolverRepairCommand())
+		cmds = append(cmds, buildLinuxResolverRepairCommand(networkMode))
+		if networkMode == networkModeIPv6Only {
+			cmds = append(cmds, buildLinuxTXOffloadCommand(v.NetworkConfigs))
+		}
 	}
 	script := strings.Join(cmds, "\n")
 	return postClonePlan{argv: []string{"sh", "-c", script}, hint: script}, true
 }
 
-// postCloneNeeded is planPostClone's decision alone — cheap and syscall-free,
+// postCloneNeeded is planPostCloneForMode's decision alone — cheap and syscall-free,
 // so lock-holding callers (owedOpFor) can ask without building the plan.
 func postCloneNeeded(spec meta.VMSpec, v *vm.VM) bool {
 	return spec.OS == string(cocoonv1.OSWindows) || isLinuxSpec(spec) || needsPostClone(spec.Backend, v.NetworkConfigs)
+}
+
+// needsGuestSetupOnCreate extends the clone fixup to fresh Linux and Windows
+// boots in IPv6-only clusters. Base images can carry a stale DHCPv6 DUID or
+// IPv4-first guest configuration, so publishing Ready before this pass can
+// leave the VM without the lease address tracked by cocoon-net.
+func needsGuestSetupOnCreate(spec meta.VMSpec, cloned bool, networkMode string) bool {
+	if cloned {
+		return true
+	}
+	return networkMode == networkModeIPv6Only &&
+		(spec.OS == string(cocoonv1.OSWindows) || isLinuxSpec(spec))
 }
 
 func isLinuxSpec(spec meta.VMSpec) bool {
@@ -396,18 +425,39 @@ func needsPostClone(backend string, networkConfigs []*vm.NetworkConfig) bool {
 	return slices.ContainsFunc(networkConfigs, isStaticNIC)
 }
 
-// buildWindowsPostCloneArgv: -PresentOnly is load-bearing — ghost Net PnP
-// entries make Disable-PnpDevice return 0x80041001 before the real adapter.
-func buildWindowsPostCloneArgv() []string {
-	const ps = `$x=Get-PnpDevice -Class Net -PresentOnly;` +
-		`$x|Disable-PnpDevice -Confirm:$false;` +
+// buildWindowsPostCloneArgvForMode: -PresentOnly is load-bearing — ghost Net
+// PnP entries make Disable-PnpDevice return 0x80041001 before the real adapter.
+func buildWindowsPostCloneArgvForMode(networkMode string) []string {
+	script := `$x=Get-PnpDevice -Class Net -PresentOnly;`
+	if networkMode == networkModeIPv6Only {
+		script += `$n=Get-NetAdapter -Physical|Where-Object Status -eq 'Up'|Sort-Object ifIndex|Select-Object -First 1;` +
+			`if($null -eq $n){throw 'no active physical network adapter'};` +
+			`$duidTime=[BitConverter]::GetBytes([uint32]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()-946684800));[Array]::Reverse($duidTime);` +
+			`$duid=[byte[]](0,1,0,1)+$duidTime+[byte[]]($n.MacAddress.Split('-')|ForEach-Object {[Convert]::ToByte($_,16)});` +
+			`New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name Dhcpv6DUID -PropertyType Binary -Value $duid -Force|Out-Null;`
+	}
+	script += `$x|Disable-PnpDevice -Confirm:$false;` +
 		`$x|Enable-PnpDevice -Confirm:$false`
-	return []string{"powershell", "-nop", "-c", ps}
+	if networkMode == networkModeIPv6Only {
+		script += `;$n=$null;for($i=0;$i-lt 30 -and $null -eq $n;$i++){$n=Get-NetAdapter -Physical|Where-Object Status -eq 'Up'|Sort-Object ifIndex|Select-Object -First 1;if($null -eq $n){Start-Sleep -Seconds 1}};` +
+			`if($null -eq $n){throw 'network adapter did not return after PnP rebind'};` +
+			`$n|Enable-NetAdapterBinding -ComponentID ms_tcpip6 -ErrorAction Stop;` +
+			`$n|Disable-NetAdapterBinding -ComponentID ms_tcpip -ErrorAction Stop;` +
+			`ipconfig /release6|Out-Null;ipconfig /renew6|Out-Null`
+	}
+	return []string{"powershell", "-nop", "-c", script}
 }
 
 // buildLinuxResolverRepairCommand repairs resolver state copied by a snapshot
 // without replacing a working distro- or user-managed /etc/resolv.conf.
-func buildLinuxResolverRepairCommand() string {
+func buildLinuxResolverRepairCommand(networkMode string) string {
+	if networkMode == networkModeIPv6Only {
+		return "command -v systemctl >/dev/null 2>&1 || { echo 'systemd is required for IPv6-only DNS' >&2; exit 1; }; " +
+			"systemctl enable --now systemd-resolved; " +
+			"i=0; while [ $i -lt 30 ] && [ ! -s /run/systemd/resolve/resolv.conf ]; do i=$((i+1)); sleep 1; done; " +
+			"[ -s /run/systemd/resolve/resolv.conf ] || { echo 'systemd-resolved did not publish resolv.conf' >&2; exit 1; }; " +
+			"rm -f /etc/resolv.conf && ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf"
+	}
 	return "if command -v systemctl >/dev/null 2>&1 && " +
 		"(systemctl is-active --quiet systemd-resolved || systemctl is-enabled --quiet systemd-resolved); then " +
 		"i=0; while [ $i -lt 30 ] && [ ! -s /run/systemd/resolve/resolv.conf ]; do i=$((i+1)); sleep 1; done; " +
@@ -415,6 +465,25 @@ func buildLinuxResolverRepairCommand() string {
 		"{ [ ! -e /etc/resolv.conf ] || { [ ! -L /etc/resolv.conf ] && " +
 		"grep -Fq 'managed by man:systemd-resolved(8)' /etc/resolv.conf; }; }; then " +
 		"rm -f /etc/resolv.conf && ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf; fi; fi"
+}
+
+// buildLinuxTXOffloadCommand disables TX checksum offload on each guest NIC.
+// TC redirect plus NAT66 can otherwise pass a deferred checksum through the
+// virtio/veth/bridge path and stall long-lived TCP streams such as HTTP/2.
+func buildLinuxTXOffloadCommand(networkConfigs []*vm.NetworkConfig) string {
+	cmds := []string{"command -v ethtool >/dev/null 2>&1 || { echo 'ethtool is required for IPv6-only networking' >&2; exit 1; }"}
+	for _, nc := range networkConfigs {
+		if nc == nil || nc.MAC == "" {
+			continue
+		}
+		mac := strings.ToLower(nc.MAC)
+		cmds = append(cmds, fmt.Sprintf(
+			"iface=''; for p in /sys/class/net/*/address; do [ \"$(tr '[:upper:]' '[:lower:]' < \"$p\")\" = '%s' ] && iface=$(basename \"$(dirname \"$p\")\") && break; done; "+
+				"[ -n \"$iface\" ] || { echo 'guest NIC with MAC %s not found' >&2; exit 1; }; ethtool -K \"$iface\" tx off",
+			mac, mac,
+		))
+	}
+	return strings.Join(cmds, "\n")
 }
 
 // isCloudimgVM probes the on-disk overlay when sourceImage is empty (forkFrom, wake).
@@ -435,9 +504,9 @@ func prefixToSubnet(prefix int) string {
 	return fmt.Sprintf("%d.%d.%d.%d", mask>>24, (mask>>16)&0xFF, (mask>>8)&0xFF, mask&0xFF)
 }
 
-// buildPostCloneCommands renders the in-guest fixup script. cloudimg → cloud-init;
-// OCI → direct systemd-networkd writes.
-func buildPostCloneCommands(vmName, backend, vmID, sourceImage string, networkConfigs []*vm.NetworkConfig) string {
+// buildPostCloneCommandsForMode renders the in-guest fixup script. cloudimg →
+// cloud-init; OCI → direct systemd-networkd writes.
+func buildPostCloneCommandsForMode(vmName, backend, vmID, sourceImage string, networkConfigs []*vm.NetworkConfig, networkMode string) string {
 	var cmds []string
 
 	cmds = append(cmds, "echo 3 > /proc/sys/vm/drop_caches")
@@ -459,7 +528,7 @@ func buildPostCloneCommands(vmName, backend, vmID, sourceImage string, networkCo
 		cmds = append(cmds, "cloud-init modules --mode=config && systemctl restart systemd-networkd")
 	} else {
 		for _, nc := range networkConfigs {
-			cmds = append(cmds, buildNetworkdFileCmd(nc))
+			cmds = append(cmds, buildNetworkdFileCmdForMode(nc, networkMode))
 		}
 		cmds = append(cmds, "systemctl restart systemd-networkd")
 	}
@@ -467,15 +536,18 @@ func buildPostCloneCommands(vmName, backend, vmID, sourceImage string, networkCo
 	return strings.Join(cmds, "\n")
 }
 
-func buildNetworkdFileCmd(nc *vm.NetworkConfig) string {
+func buildNetworkdFileCmdForMode(nc *vm.NetworkConfig, networkMode string) string {
 	macSan := strings.ReplaceAll(nc.MAC, ":", "")
 	var cfg string
 	if isStaticNIC(nc) {
 		cfg = fmt.Sprintf("[Match]\\nMACAddress=%s\\n\\n[Network]\\nAddress=%s/%d\\nGateway=%s\\n",
 			nc.MAC, nc.Network.IP, nc.Network.Prefix, nc.Network.Gateway)
 	} else {
-		cfg = fmt.Sprintf("[Match]\\nMACAddress=%s\\n\\n[Network]\\nDHCP=ipv4\\n\\n[DHCPv4]\\nClientIdentifier=mac\\n",
-			nc.MAC)
+		if networkMode == networkModeIPv6Only {
+			cfg = fmt.Sprintf("[Match]\\nMACAddress=%s\\n\\n[Network]\\nDHCP=ipv6\\nIPv6AcceptRA=yes\\n\\n[DHCPv6]\\nDUIDType=link-layer\\n", nc.MAC)
+		} else {
+			cfg = fmt.Sprintf("[Match]\\nMACAddress=%s\\n\\n[Network]\\nDHCP=ipv4\\n\\n[DHCPv4]\\nClientIdentifier=mac\\n", nc.MAC)
+		}
 	}
 	return fmt.Sprintf("printf '%s' > /etc/systemd/network/10-%s.network", cfg, macSan)
 }

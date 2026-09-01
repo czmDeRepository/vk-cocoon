@@ -195,7 +195,11 @@ func (c *CocoonCLI) Exec(ctx context.Context, vmID string, argv []string, env ma
 func (c *CocoonCLI) Remove(ctx context.Context, vmID string) error {
 	cmd := c.command(ctx, "vm", "rm", "--force", vmID)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return cocoonCmdError("vm rm", vmID, err, out)
+		wrapped := cocoonCmdError("vm rm", vmID, err, out)
+		if isCocoonNotFound(wrapped) {
+			return fmt.Errorf("cocoon vm rm %s: %w", vmID, ErrVMNotFound)
+		}
+		return wrapped
 	}
 	return nil
 }
