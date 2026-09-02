@@ -14,7 +14,8 @@ pushing per-VM status back to the kubelet.
 Kubernetes API ──► virtual-kubelet provider (vk-cocoon, one per node)
    pod CRUD    ──► CreatePod / DeletePod / UpdatePod ── cocoon clone/run/snapshot
    status      ◄── async notify ── per-pod probe loop + real-time VM event watcher
-   snapshots   ──► Puller / Pusher ── OCI registry (cross-node hibernate/wake)
+   images      ──► local cache ──► mounted NAS publication ──► OCI/HTTP fallback
+   snapshots   ──► Puller / Pusher ── OCI registry (hibernate/wake and fallback)
 ```
 
 ## Architecture

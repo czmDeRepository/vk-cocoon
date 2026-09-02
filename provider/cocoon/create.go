@@ -21,6 +21,7 @@ import (
 	"github.com/cocoonstack/cocoon-common/ociutil"
 
 	"github.com/cocoonstack/vk-cocoon/metrics"
+	"github.com/cocoonstack/vk-cocoon/nasimage"
 	"github.com/cocoonstack/vk-cocoon/probes"
 	"github.com/cocoonstack/vk-cocoon/vm"
 )
@@ -408,6 +409,11 @@ func (p *Provider) ensureRunImage(ctx context.Context, image string, force bool)
 }
 
 func (p *Provider) resolveRunImage(ctx context.Context, image string, force bool) (string, error) {
+	if local, found, err := p.resolveRunImageFromNAS(ctx, image, force); err != nil {
+		return "", err
+	} else if found {
+		return local, nil
+	}
 	if p.Puller == nil || p.Puller.Registry == nil || isHTTPURL(image) {
 		return image, p.Runtime.EnsureImage(ctx, image, force)
 	}
@@ -441,7 +447,7 @@ func (p *Provider) ensureSnapshot(ctx context.Context, repo, tag, local string) 
 	if snapshot, err := p.Runtime.Snapshot(ctx, local); err == nil {
 		return snapshot, nil
 	}
-	if p.Puller == nil {
+	if p.Puller == nil && p.ImageNAS == nil {
 		return nil, nil
 	}
 	// The in-flight re-check is load-bearing: SnapshotImport rm's the target
@@ -453,6 +459,23 @@ func (p *Provider) ensureSnapshot(ctx context.Context, repo, tag, local string) 
 		defer cancel()
 		if snapshot, err := p.Runtime.Snapshot(shared, local); err == nil {
 			return snapshot, nil
+		}
+		if p.ImageNAS != nil {
+			var imported *vm.Snapshot
+			found, nasErr := p.ImageNAS.WithPublication(shared, repo+":"+tag, nasimage.ModeClone, func(publication *nasimage.Publication) error {
+				var importErr error
+				imported, importErr = p.importNASClone(shared, publication, local)
+				return importErr
+			})
+			if nasErr != nil {
+				return nil, fmt.Errorf("materialize snapshot %s from NAS: %w", local, nasErr)
+			}
+			if found {
+				return imported, nil
+			}
+		}
+		if p.Puller == nil {
+			return nil, nil
 		}
 		pullStart := time.Now()
 		if pullErr := p.Puller.PullSnapshot(shared, repo, tag, local); pullErr != nil {

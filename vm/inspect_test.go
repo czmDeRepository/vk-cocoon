@@ -100,6 +100,7 @@ func TestParseSnapshotJSON(t *testing.T) {
   "image": "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img",
   "image_digest": "sha256:abcdef1234567890",
   "image_type": "cloudimg",
+	"image_blob_ids": {"abcdef1234567890": {}},
   "hypervisor": "firecracker"
 }`)
 
@@ -118,6 +119,12 @@ func TestParseSnapshotJSON(t *testing.T) {
 	}
 	if got.ImageDigest != "sha256:abcdef1234567890" {
 		t.Errorf("ImageDigest = %q, want sha256:abcdef1234567890", got.ImageDigest)
+	}
+	if got.ImageType != "cloudimg" {
+		t.Errorf("ImageType = %q, want cloudimg", got.ImageType)
+	}
+	if _, ok := got.ImageBlobIDs["abcdef1234567890"]; !ok {
+		t.Errorf("ImageBlobIDs = %v, want digest", got.ImageBlobIDs)
 	}
 	if got.Hypervisor != "firecracker" {
 		t.Errorf("Hypervisor = %q, want firecracker", got.Hypervisor)

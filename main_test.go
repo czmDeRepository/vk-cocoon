@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +22,29 @@ func TestBuildRegistry(t *testing.T) {
 
 	if _, err := buildRegistry(buildOpts{}); err == nil {
 		t.Fatal("buildRegistry with no OCI_REGISTRY: want error, got nil")
+	}
+}
+
+func TestBuildProviderRejectsInvalidNASRoot(t *testing.T) {
+	_, err := buildProvider(t.Context(), buildOpts{
+		ociRegistry:  "example.com/proj/repo",
+		clusterName:  "cocoon-jj",
+		imageNASRoot: "relative/path",
+		restoreMode:  defaultRestoreMode,
+	})
+	if err == nil || !strings.Contains(err.Error(), "VK_IMAGE_NAS_ROOT") {
+		t.Fatalf("buildProvider error = %v", err)
+	}
+}
+
+func TestBuildProviderRequiresClusterForNAS(t *testing.T) {
+	_, err := buildProvider(t.Context(), buildOpts{
+		ociRegistry:  "example.com/proj/repo",
+		imageNASRoot: "/mnt/bytenas/cocoon/v1/clusters/cocoon-jj",
+		restoreMode:  defaultRestoreMode,
+	})
+	if err == nil || !strings.Contains(err.Error(), "VK_CLUSTER") {
+		t.Fatalf("buildProvider error = %v", err)
 	}
 }
 

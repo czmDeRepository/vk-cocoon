@@ -88,12 +88,19 @@ func CocoonRootDir() string {
 
 // StorageBytes returns total and available bytes on the cocoon root filesystem.
 func StorageBytes() (total, available int64) {
-	rootDir := CocoonRootDir()
+	total, available, _ = StorageBytesAt(CocoonRootDir())
+	return total, available
+}
+
+// StorageBytesAt returns total and available bytes for the filesystem that
+// contains path. Callers that need admission guarantees should use the error;
+// StorageBytes preserves its historical zero-on-error behavior.
+func StorageBytesAt(path string) (total, available int64, err error) {
 	var stat syscallStatfs
-	if err := statfs(rootDir, &stat); err != nil {
-		return 0, 0
+	if err := statfs(path, &stat); err != nil {
+		return 0, 0, err
 	}
-	return statTotalBytes(stat), statAvailBytes(stat)
+	return statTotalBytes(stat), statAvailBytes(stat), nil
 }
 
 // ReadKeyedProcFile reads the named "Key: value" fields from path (e.g.

@@ -40,6 +40,7 @@ import (
 	"github.com/cocoonstack/cocoon-common/oci"
 	"github.com/cocoonstack/vk-cocoon/guest/sac"
 	"github.com/cocoonstack/vk-cocoon/metrics"
+	"github.com/cocoonstack/vk-cocoon/nasimage"
 	"github.com/cocoonstack/vk-cocoon/network"
 	"github.com/cocoonstack/vk-cocoon/probes"
 	"github.com/cocoonstack/vk-cocoon/provider"
@@ -83,6 +84,8 @@ func main() {
 	nodeName := commonk8s.EnvOrDefault("VK_NODE_NAME", defaultNodeName)
 	metricsAddr := commonk8s.EnvOrDefault("VK_METRICS_ADDR", defaultMetricsAddr)
 	ociRegistry := os.Getenv("OCI_REGISTRY")
+	clusterName := strings.TrimSpace(os.Getenv("VK_CLUSTER"))
+	imageNASRoot := os.Getenv("VK_IMAGE_NAS_ROOT")
 	leasesPath := commonk8s.EnvOrDefault("VK_LEASES_PATH", network.DefaultLeasesPath)
 	controlSocket := network.DefaultControlSocket
 	if configured, ok := os.LookupEnv("VK_COCOON_NET_CONTROL_SOCKET"); ok {
@@ -155,6 +158,8 @@ func main() {
 		nodeName:                   nodeName,
 		snapshotCompatibilityClass: snapshotCompatibilityClass,
 		ociRegistry:                ociRegistry,
+		clusterName:                clusterName,
+		imageNASRoot:               imageNASRoot,
 		leasesPath:                 leasesPath,
 		controlSocket:              controlSocket,
 		cocoonBin:                  cocoonBin,
@@ -264,6 +269,8 @@ type buildOpts struct {
 	nodeName                   string
 	snapshotCompatibilityClass string
 	ociRegistry                string
+	clusterName                string
+	imageNASRoot               string
 	leasesPath                 string
 	controlSocket              string
 	cocoonBin                  string
@@ -307,6 +314,17 @@ func buildProvider(ctx context.Context, opts buildOpts) (*cocoon.Provider, error
 	p.Runtime = runtime
 	p.MacosBin = opts.macosBin
 	p.MacosVNCPassword = opts.macosVNCPassword
+	if opts.imageNASRoot != "" {
+		if errs := utilvalidation.IsDNS1123Subdomain(opts.clusterName); len(errs) != 0 {
+			return nil, fmt.Errorf("configure VK_CLUSTER %q: %s", opts.clusterName, strings.Join(errs, "; "))
+		}
+		imageNAS, err := nasimage.NewMounted(opts.imageNASRoot, opts.clusterName, opts.snapshotCompatibilityClass)
+		if err != nil {
+			return nil, fmt.Errorf("configure VK_IMAGE_NAS_ROOT: %w", err)
+		}
+		p.ImageNAS = imageNAS
+		logger.Infof(ctx, "mounted NAS image source enabled at %s", imageNAS.Root)
+	}
 	transfer := snapshots.TransferConfigFromEnv()
 	p.Puller = &snapshots.Puller{Registry: registry, Runtime: runtime, Transfer: transfer}
 	p.Pusher = &snapshots.Pusher{Registry: registry, Runtime: runtime, Transfer: transfer, NodeName: opts.nodeName}

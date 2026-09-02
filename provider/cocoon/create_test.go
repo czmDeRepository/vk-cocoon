@@ -1935,8 +1935,10 @@ type fakeRuntime struct {
 		image string
 		force bool
 	}
-	imagesPresent     map[string]bool // names that Image() reports as cached
-	imageInspectCalls []string
+	imagesPresent      map[string]bool // names that Image() reports as cached
+	imageDigests       map[string]string
+	imageImportDigests map[string]string
+	imageInspectCalls  []string
 
 	netResizeCalls []netResizeCall
 	netResizeErr   error
@@ -1947,9 +1949,10 @@ type fakeRuntime struct {
 
 	// mu guards snapshots, imagesPresent, and the call ledgers so
 	// singleflight tests can drive concurrent ensure* callers under -race.
-	mu              sync.Mutex
-	snapshotImports []string
-	imageImports    []string
+	mu                   sync.Mutex
+	snapshotImports      []string
+	snapshotImportResult *vm.Snapshot
+	imageImports         []string
 	// importHook / ensureImageHook fire at SnapshotImport+ImageImport /
 	// EnsureImage entry so a test can hold a flight in-flight.
 	importHook      func()
@@ -2103,7 +2106,22 @@ func (f *fakeRuntime) SnapshotImport(ctx context.Context, name string) (io.Write
 		return nil, nil, err
 	}
 	wait := func() error {
-		f.registerSnapshot(name)
+		if f.snapshotImportResult == nil {
+			f.registerSnapshot(name)
+			return nil
+		}
+		result := *f.snapshotImportResult
+		result.Name = name
+		result.ImageBlobIDs = make(map[string]struct{}, len(f.snapshotImportResult.ImageBlobIDs))
+		for digest := range f.snapshotImportResult.ImageBlobIDs {
+			result.ImageBlobIDs[digest] = struct{}{}
+		}
+		f.mu.Lock()
+		if f.snapshots == nil {
+			f.snapshots = map[string]*vm.Snapshot{}
+		}
+		f.snapshots[name] = &result
+		f.mu.Unlock()
 		return nil
 	}
 	return nopWriteCloser{}, wait, nil
@@ -2127,14 +2145,27 @@ func (f *fakeRuntime) EnsureImage(_ context.Context, image string, force bool) e
 	return nil
 }
 
-func (f *fakeRuntime) Image(_ context.Context, name string) error {
+func (f *fakeRuntime) Image(ctx context.Context, name string) error {
+	_, err := f.ImageInspect(ctx, name)
+	return err
+}
+
+func (f *fakeRuntime) ImageInspect(_ context.Context, name string) (*vm.Image, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.imageInspectCalls = append(f.imageInspectCalls, name)
 	if f.imagesPresent[name] {
-		return nil
+		digest := f.imageDigests[name]
+		if digest == "" {
+			if strings.HasPrefix(name, "sha256:") {
+				digest = name
+			} else {
+				digest = "present"
+			}
+		}
+		return &vm.Image{ID: digest, Name: name}, nil
 	}
-	return fmt.Errorf("image %s: %w", name, vm.ErrImageNotFound)
+	return nil, fmt.Errorf("image %s: %w", name, vm.ErrImageNotFound)
 }
 
 // ImageImport mirrors SnapshotImport's contract minus the rm-first: the name
@@ -2157,6 +2188,14 @@ func (f *fakeRuntime) ImageImport(ctx context.Context, name string) (io.WriteClo
 			f.imagesPresent = map[string]bool{}
 		}
 		f.imagesPresent[name] = true
+		if digest := f.imageImportDigests[name]; digest != "" {
+			f.imagesPresent[digest] = true
+			if f.imageDigests == nil {
+				f.imageDigests = map[string]string{}
+			}
+			f.imageDigests[name] = digest
+			f.imageDigests[digest] = digest
+		}
 		return nil
 	}
 	return nopWriteCloser{}, wait, nil

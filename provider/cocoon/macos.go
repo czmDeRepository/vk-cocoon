@@ -30,6 +30,7 @@ import (
 	"github.com/cocoonstack/cocoon-common/meta"
 
 	"github.com/cocoonstack/vk-cocoon/metrics"
+	"github.com/cocoonstack/vk-cocoon/nasimage"
 	"github.com/cocoonstack/vk-cocoon/probes"
 	"github.com/cocoonstack/vk-cocoon/vm"
 )
@@ -382,6 +383,21 @@ func (p *Provider) ensureMacosImage(ctx context.Context, image string) error {
 		// fail the flight for its remaining waiters.
 		shared, cancel := p.detachedImportContext()
 		defer cancel()
+		if p.ImageNAS != nil {
+			found, err := p.ImageNAS.WithPublication(shared, image, nasimage.ModeRun, func(publication *nasimage.Publication) error {
+				digest, inspectErr := p.macosImageDigest(shared, image)
+				if inspectErr == nil && digest == publication.Manifest.Artifact.Digest {
+					return nil
+				}
+				return p.importNASMacosImage(shared, publication, image)
+			})
+			if err != nil {
+				return "", fmt.Errorf("materialize macOS image %s from NAS: %w", image, err)
+			}
+			if found {
+				return image, nil
+			}
+		}
 		if p.macosImagePresent(shared, image) {
 			return image, nil
 		}

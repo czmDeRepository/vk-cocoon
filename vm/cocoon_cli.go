@@ -109,14 +109,28 @@ func (c *CocoonCLI) EnsureImage(ctx context.Context, image string, force bool) e
 // Image runs `cocoon image inspect` as a local-presence probe; "not found
 // in any backend" maps to ErrImageNotFound.
 func (c *CocoonCLI) Image(ctx context.Context, name string) error {
+	_, err := c.ImageInspect(ctx, name)
+	return err
+}
+
+// ImageInspect runs `cocoon image inspect` and returns the resolved immutable
+// digest and alias metadata.
+func (c *CocoonCLI) ImageInspect(ctx context.Context, name string) (*Image, error) {
 	out, err := c.command(ctx, "image", "inspect", name).CombinedOutput()
 	if err != nil {
 		if strings.Contains(strings.ToLower(string(out)), "not found in any backend") {
-			return fmt.Errorf("cocoon image inspect %s: %w", name, ErrImageNotFound)
+			return nil, fmt.Errorf("cocoon image inspect %s: %w", name, ErrImageNotFound)
 		}
-		return cocoonCmdError("image inspect", name, err, out)
+		return nil, cocoonCmdError("image inspect", name, err, out)
 	}
-	return nil
+	var image Image
+	if err := json.Unmarshal(out, &image); err != nil {
+		return nil, fmt.Errorf("decode image inspect %s: %w", name, err)
+	}
+	if image.ID == "" {
+		return nil, fmt.Errorf("decode image inspect %s: empty image id", name)
+	}
+	return &image, nil
 }
 
 // ImageImport spawns `cocoon image import <name>` and returns its stdin

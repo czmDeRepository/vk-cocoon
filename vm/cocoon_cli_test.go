@@ -80,6 +80,26 @@ exit 1
 	}
 }
 
+func TestImageInspectReturnsDigestMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cocoon")
+	payload := `#!/bin/sh
+printf '%s\n' '{"id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"team/image:v1","type":"cloudimg","size":123}'
+`
+	if err := os.WriteFile(script, []byte(payload), 0o755); err != nil {
+		t.Fatalf("write fake cocoon: %v", err)
+	}
+	image, err := NewCocoonCLI(script).ImageInspect(t.Context(), "team/image:v1")
+	if err != nil {
+		t.Fatalf("ImageInspect: %v", err)
+	}
+	if image.ID != "sha256:"+strings.Repeat("a", 64) || image.Name != "team/image:v1" || image.Type != "cloudimg" || image.Size != 123 {
+		t.Fatalf("ImageInspect = %+v", image)
+	}
+}
+
 func TestSnapshotNameTakenPhrases(t *testing.T) {
 	t.Parallel()
 

@@ -9,6 +9,8 @@ systemd unit reads them from `/etc/cocoon/vk-cocoon.env`.
 | `VK_NODE_NAME` | `cocoon-pool` | Virtual node name registered with the K8s API. |
 | `VK_LOG_LEVEL` | `info` | `projecteru2/core/log` level. |
 | `OCI_REGISTRY` | **required** | OCI registry base for snapshots and cloud images (e.g. an Artifact Registry repo). Auth resolves GCP ADC then docker config. |
+| `VK_CLUSTER` | required with `VK_IMAGE_NAS_ROOT` | Physical cluster identity recorded in NAS refs/manifests, for example `cocoon-jj`. Publications from another cluster fail closed. |
+| `VK_IMAGE_NAS_ROOT` | unset | Optional cluster-scoped mounted NAS root. On a local cache miss, relative managed image refs are resolved from `images/refs/...` (run/macOS) or `snapshots/refs/...` (clone), validated under shared GC locks, and imported into the node-local store. An absent ref retains OCI/HTTP fallback; an existing but invalid publication fails closed. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to a GCP service-account JSON key with `roles/artifactregistry.writer`, fed to ADC for the snapshot push. Unset falls back to the read-only node instance SA. |
 | `VK_LEASES_PATH` | `/var/lib/cocoon/net/leases.json` | cocoon-net JSON lease file. |
 | `VK_COCOON_NET_CONTROL_SOCKET` | `/run/cocoon-net/control.sock` | Root-only cocoon-net Unix socket used to reclaim DHCP leases after VM destruction; set explicitly to empty to disable. |
@@ -45,3 +47,16 @@ systemd unit reads them from `/etc/cocoon/vk-cocoon.env`.
 Keep zstd and chunking disabled until every fleet reader and snapshot tool
 supports the v2 snapshot format. The push and pull memory budgets can be tuned
 independently without changing the writer format.
+
+When `VK_IMAGE_NAS_ROOT` is set, `VK_CLUSTER` must match the publication's
+cluster, and the directory must remain backed by a Linux `bytefuse`/`virtio_pfs`
+mount. Startup and every cache-miss lookup fail closed if the mount is absent.
+Immutable artifacts, manifests, and digest locks use the
+first two lowercase hexadecimal characters of their SHA256 digest as a fixed
+256-way shard below the `sha256/` directory; mutable image refs remain under
+`images/refs/...` or `snapshots/refs/...`. Run publications must have an empty snapshot CPU class. Clone
+publications must match `VK_SNAPSHOT_CPU_CLASS` exactly and include the pinned
+base image plus every `image_blob_ids` dependency. Imports keep complete local
+copies; this setting is cache-miss recovery, not a shared backing-file mode.
+Before importing, vk-cocoon conservatively includes 10% import overhead and
+keeps the larger of 50 GiB or 10% of the local image-cache filesystem free.

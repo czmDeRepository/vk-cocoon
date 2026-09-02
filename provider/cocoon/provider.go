@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocoonstack/vk-cocoon/guest"
 	"github.com/cocoonstack/vk-cocoon/metrics"
+	"github.com/cocoonstack/vk-cocoon/nasimage"
 	"github.com/cocoonstack/vk-cocoon/network"
 	"github.com/cocoonstack/vk-cocoon/probes"
 	"github.com/cocoonstack/vk-cocoon/provider"
@@ -91,17 +92,24 @@ type Provider struct {
 	// MacosVNCPassword protects the node-exposed per-VM QEMU VNC ports.
 	MacosBin         string
 	MacosVNCPassword string
-	Puller           *snapshots.Puller
-	Pusher           *snapshots.Pusher
-	PeerRestorer     *snapshots.PeerRestorer
-	PeerPort         string
-	Registry         oci.Registry
-	LeaseParser      *network.LeaseParser
-	LeaseReleaser    network.LeaseReleaser
-	Pinger           network.Pinger
-	GuestSAC         guest.Dialer
-	Probes           *probes.Manager
-	Recorder         record.EventRecorder
+	ImageNAS         *nasimage.Store
+	// NASCacheRoot overrides the local filesystem used for import admission.
+	// Production leaves it empty and selects the cocoon/cocoon-macos root.
+	NASCacheRoot             string
+	NASMinFreeBytes          int64
+	NASMinFreePercent        int
+	NASImportOverheadPercent int
+	Puller                   *snapshots.Puller
+	Pusher                   *snapshots.Pusher
+	PeerRestorer             *snapshots.PeerRestorer
+	PeerPort                 string
+	Registry                 oci.Registry
+	LeaseParser              *network.LeaseParser
+	LeaseReleaser            network.LeaseReleaser
+	Pinger                   network.Pinger
+	GuestSAC                 guest.Dialer
+	Probes                   *probes.Manager
+	Recorder                 record.EventRecorder
 
 	startTime time.Time
 	//nolint:containedctx // deferred recheck must outlive the watcher ctx (which cycles on event-stream reconnect) and be cancelable only by Close
@@ -156,21 +164,24 @@ type Provider struct {
 func NewProvider(ctx context.Context) *Provider {
 	lifecycleCtx, lifecycleStop := context.WithCancel(ctx)
 	return &Provider{
-		startTime:        time.Now(),
-		lifecycleCtx:     lifecycleCtx,
-		lifecycleStop:    lifecycleStop,
-		OrphanPolicy:     provider.OrphanDestroy,
-		RestoreMode:      vm.RestoreOnDemand,
-		Pinger:           network.NopPinger{},
-		pods:             map[string]*corev1.Pod{},
-		vmsByPod:         map[string]*vm.VM{},
-		vmsByName:        map[string]*vm.VM{},
-		macosVNC:         map[string]int{},
-		lastRestart:      map[string]time.Time{},
-		pendingRecheck:   map[string]struct{}{},
-		resumedOps:       map[string]struct{}{},
-		lifecycleIntent:  map[string]meta.LifecycleStatus{},
-		lifecycleFlushed: map[string]string{},
+		startTime:                time.Now(),
+		lifecycleCtx:             lifecycleCtx,
+		lifecycleStop:            lifecycleStop,
+		OrphanPolicy:             provider.OrphanDestroy,
+		RestoreMode:              vm.RestoreOnDemand,
+		NASMinFreeBytes:          50 << 30,
+		NASMinFreePercent:        10,
+		NASImportOverheadPercent: 10,
+		Pinger:                   network.NopPinger{},
+		pods:                     map[string]*corev1.Pod{},
+		vmsByPod:                 map[string]*vm.VM{},
+		vmsByName:                map[string]*vm.VM{},
+		macosVNC:                 map[string]int{},
+		lastRestart:              map[string]time.Time{},
+		pendingRecheck:           map[string]struct{}{},
+		resumedOps:               map[string]struct{}{},
+		lifecycleIntent:          map[string]meta.LifecycleStatus{},
+		lifecycleFlushed:         map[string]string{},
 	}
 }
 

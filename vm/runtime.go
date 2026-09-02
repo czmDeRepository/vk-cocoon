@@ -76,11 +76,22 @@ type VM struct {
 // produced the snapshot, so vk-cocoon can reject backend-mismatched clones
 // before shelling out to cocoon.
 type Snapshot struct {
-	ID          string
-	Name        string
-	Image       string
-	ImageDigest string // resolved image digest (e.g. "sha256:abc...")
-	Hypervisor  string
+	ID           string
+	Name         string
+	Image        string
+	ImageDigest  string // resolved image digest (e.g. "sha256:abc...")
+	ImageType    string
+	ImageBlobIDs map[string]struct{}
+	Hypervisor   string
+}
+
+// Image is the subset of `cocoon image inspect` needed to verify that a
+// local alias resolves to the immutable digest selected by a publication.
+type Image struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Size int64  `json:"size"`
 }
 
 // RestoreMode maps to `cocoon vm clone --restore-mode`: how CH restores guest
@@ -171,6 +182,7 @@ type Runtime interface {
 	// Image probes local presence via `cocoon image inspect`;
 	// absence is ErrImageNotFound.
 	Image(ctx context.Context, name string) error
+	ImageInspect(ctx context.Context, name string) (*Image, error)
 	ImageImport(ctx context.Context, name string) (io.WriteCloser, func() error, error)
 	WatchEvents(ctx context.Context) (<-chan VMEvent, error)
 	// NetResize hot-resizes a live VM's NIC count.
